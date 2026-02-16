@@ -19,7 +19,6 @@ const App: React.FC = () => {
       if (supabase) {
         const { data: { session } } = await supabase.auth.getSession();
         setSessionUser(session?.user || null);
-        
         if (!session) setIsSyncing(false);
       } else {
         setIsSyncing(false);
@@ -30,6 +29,10 @@ const App: React.FC = () => {
 
     const { data: { subscription } } = supabase?.auth.onAuthStateChange((_event, session) => {
       setSessionUser(session?.user || null);
+      if (!session) {
+        setState(null);
+        setIsSyncing(false);
+      }
     }) || { data: { subscription: null } };
 
     return () => subscription?.unsubscribe();
@@ -40,14 +43,23 @@ const App: React.FC = () => {
     if (sessionUser) {
       const initData = async () => {
         setIsSyncing(true);
-        const data = await DataService.loadState(sessionUser.id);
         
-        // Ensure currentUser is synced with auth metadata
+        const role = sessionUser.user_metadata?.role || Role.FRIEND;
+        let data: AppState;
+
+        if (role === Role.ADMIN) {
+          // Admins load a merged view of all friend data
+          data = await DataService.loadMasterState();
+        } else {
+          // Friends load only their own row
+          data = await DataService.loadState(sessionUser.id);
+        }
+        
         const userWithMeta: User = {
           id: sessionUser.id,
           name: sessionUser.user_metadata?.name || sessionUser.email?.split('@')[0] || 'User',
           username: sessionUser.email || '',
-          role: sessionUser.user_metadata?.role || Role.FRIEND,
+          role: role,
           joinedAt: sessionUser.created_at
         };
 
@@ -56,23 +68,27 @@ const App: React.FC = () => {
         setTimeout(() => { isInitialLoad.current = false; }, 500);
       };
       initData();
-    } else {
-      setState(null);
-      isInitialLoad.current = true;
     }
   }, [sessionUser]);
 
-  // 3. Cloud Auto-save
+  // 3. Per-User Save Logic (Cloud Sync)
   useEffect(() => {
     if (state && sessionUser && !isInitialLoad.current) {
-      DataService.saveState(sessionUser.id, state);
+      // We only save the current state to the user's specific row
+      // Note: Admins shouldn't overwrite other people's rows via this auto-save
+      // unless we specifically design a "global save" (which we don't need yet).
+      if (state.currentUser?.role !== Role.ADMIN) {
+        DataService.saveState(sessionUser.id, state);
+      }
     }
   }, [state, sessionUser]);
 
   const handleLogout = async () => {
+    setIsSyncing(true);
     await DataService.signOut();
     setSessionUser(null);
     setState(null);
+    setIsSyncing(false);
   };
 
   const handleUpdateRecord = useCallback((recordUpdate: Partial<ProgressRecord>) => {
@@ -114,6 +130,9 @@ const App: React.FC = () => {
         attachment,
         timestamp: new Date().toISOString(),
       };
+      
+      // If admin is sending, we might want to save this to the receiver's state too
+      // For now, keeping it simple within the local state session
       return {
         ...prev,
         messages: [...prev.messages, newMessage]
@@ -121,26 +140,21 @@ const App: React.FC = () => {
     });
   }, []);
 
-  // Sync wrappers for AuthScreen
-  const handleLoginSuccess = (user: User) => {
-    // Session is handled by useEffect listener
-  };
-
   if (isSyncing) {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6 text-center">
         <div className="w-20 h-20 bg-indigo-600 rounded-[2rem] flex items-center justify-center text-white text-3xl animate-bounce shadow-2xl shadow-indigo-200 mb-8">
           <i className="fas fa-shield-check animate-pulse"></i>
         </div>
-        <h2 className="text-2xl font-black text-slate-800">Security Check</h2>
-        <p className="text-sm text-slate-400 mt-2 uppercase tracking-widest font-bold">Verifying Cloud Identity...</p>
+        <h2 className="text-2xl font-black text-slate-800 tracking-tight">Accessing Cloud</h2>
+        <p className="text-[10px] text-slate-400 mt-2 uppercase tracking-widest font-black">Decrypting Secure User Partition...</p>
       </div>
     );
   }
 
-  // LOGIN GUARD: No session = No app
+  // LOGIN GUARD
   if (!sessionUser || !state) {
-    return <AuthScreen onLoginSuccess={handleLoginSuccess} />;
+    return <AuthScreen onLoginSuccess={() => {}} />;
   }
 
   const isAdmin = state.currentUser?.role === Role.ADMIN;
@@ -151,7 +165,7 @@ const App: React.FC = () => {
         <AdminDashboard 
           state={state} 
           onSendMessage={handleSendMessage}
-          onAddGroup={() => {}} // simplified for this update
+          onAddGroup={() => {}} 
           onPostToGroup={() => {}} 
           onUpdateGroupMembers={() => {}}
         />
@@ -160,8 +174,21 @@ const App: React.FC = () => {
           user={state.currentUser!} 
           state={state} 
           onUpdateRecord={handleUpdateRecord} 
-          onSendMessage={(content, attachment) => handleSendMessage('admin-1', content, attachment)}
-          onUploadStatus={() => {}}
+          onSendMessage={(content, attachment) => handleSendMessage('admin-id', content, attachment)}
+          onUploadStatus={(content, attachment) => {
+             setState(prev => {
+               if (!prev || !prev.currentUser) return prev;
+               const newStatus: StatusUpdate = {
+                 id: Math.random().toString(36).substr(2, 9),
+                 userId: prev.currentUser.id,
+                 userName: prev.currentUser.name,
+                 content,
+                 attachment,
+                 timestamp: new Date().toISOString()
+               };
+               return { ...prev, statuses: [...prev.statuses, newStatus] };
+             });
+          }}
         />
       )}
     </Layout>
