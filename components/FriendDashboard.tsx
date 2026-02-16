@@ -43,8 +43,9 @@ const FriendDashboard: React.FC<FriendDashboardProps> = ({ user, state, onUpdate
     return state.statuses.filter(s => new Date(s.timestamp).getTime() > dayAgo);
   }, [state.statuses]);
 
+  // Fix: Explicitly typing dates as string[] to resolve TypeScript overload matching error with the Date constructor
   const streak = useMemo(() => {
-    const dates = Array.from(new Set(state.records.filter(r => r.userId === user.id && r.tasksCompleted.length > 0).map(r => r.date))).sort().reverse();
+    const dates: string[] = Array.from(new Set(state.records.filter(r => r.userId === user.id && r.tasksCompleted.length > 0).map(r => r.date))).sort().reverse();
     let count = 0;
     let today = new Date();
     today.setHours(0, 0, 0, 0);
