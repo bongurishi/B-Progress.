@@ -1,38 +1,55 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AppState, Role, User, ProgressRecord, Message, Group, StatusUpdate, Attachment } from './types';
-import { getStoredData, saveData, clearSession } from './services/storage';
+import { DataService } from './services/storage';
 import AuthScreen from './components/AuthScreen';
 import Layout from './components/Layout';
 import AdminDashboard from './components/AdminDashboard';
 import FriendDashboard from './components/FriendDashboard';
 
 const App: React.FC = () => {
-  const [state, setState] = useState<AppState>(getStoredData());
+  const [state, setState] = useState<AppState | null>(null);
+  const [isSyncing, setIsSyncing] = useState(true);
+  const isInitialLoad = useRef(true);
 
+  // Initial Load from Cloud/Local
   useEffect(() => {
-    saveData(state);
+    const init = async () => {
+      const data = await DataService.loadState();
+      setState(data);
+      setIsSyncing(false);
+      // Wait a bit before allowing auto-saves to prevent overwriting cloud with empty local
+      setTimeout(() => { isInitialLoad.current = false; }, 500);
+    };
+    init();
+  }, []);
+
+  // Persistent Cloud Auto-save
+  useEffect(() => {
+    if (state && !isInitialLoad.current) {
+      DataService.saveState(state);
+    }
   }, [state]);
 
   const handleLogin = (user: User) => {
-    setState(prev => ({ ...prev, currentUser: user }));
+    setState(prev => prev ? ({ ...prev, currentUser: user }) : null);
   };
 
   const handleSignup = (user: User) => {
-    setState(prev => ({ 
+    setState(prev => prev ? ({ 
       ...prev, 
       users: [...prev.users, user],
       currentUser: user 
-    }));
+    }) : null);
   };
 
   const handleLogout = () => {
-    clearSession();
-    setState(prev => ({ ...prev, currentUser: null }));
+    setState(prev => prev ? ({ ...prev, currentUser: null }) : null);
   };
 
   const handleUpdateRecord = useCallback((recordUpdate: Partial<ProgressRecord>) => {
     setState(prev => {
+      if (!prev) return null;
       const records = [...prev.records];
       const existingIdx = records.findIndex(r => 
         r.userId === recordUpdate.userId && 
@@ -59,38 +76,43 @@ const App: React.FC = () => {
   }, []);
 
   const handleSendMessage = useCallback((receiverId: string, content: string, attachment?: Attachment) => {
-    if (!state.currentUser || (!content.trim() && !attachment)) return;
-    const newMessage: Message = {
-      id: Math.random().toString(36).substr(2, 9),
-      senderId: state.currentUser.id,
-      receiverId,
-      content,
-      attachment,
-      timestamp: new Date().toISOString(),
-    };
-    setState(prev => ({
-      ...prev,
-      messages: [...prev.messages, newMessage]
-    }));
-  }, [state.currentUser]);
+    setState(prev => {
+      if (!prev || !prev.currentUser || (!content.trim() && !attachment)) return prev;
+      const newMessage: Message = {
+        id: Math.random().toString(36).substr(2, 9),
+        senderId: prev.currentUser.id,
+        receiverId,
+        content,
+        attachment,
+        timestamp: new Date().toISOString(),
+      };
+      return {
+        ...prev,
+        messages: [...prev.messages, newMessage]
+      };
+    });
+  }, []);
 
   const handleAddGroup = useCallback((name: string, description: string, memberIds: string[]) => {
-    const newGroup: Group = {
-      id: Math.random().toString(36).substr(2, 9),
-      name,
-      description,
-      memberIds,
-      posts: []
-    };
-    setState(prev => ({
-      ...prev,
-      groups: [...prev.groups, newGroup]
-    }));
+    setState(prev => {
+      if (!prev) return null;
+      const newGroup: Group = {
+        id: Math.random().toString(36).substr(2, 9),
+        name,
+        description,
+        memberIds,
+        posts: []
+      };
+      return {
+        ...prev,
+        groups: [...prev.groups, newGroup]
+      };
+    });
   }, []);
 
   const handlePostToGroup = useCallback((groupId: string, content: string, attachment?: Attachment) => {
-    if (!state.currentUser) return;
     setState(prev => {
+      if (!prev || !prev.currentUser) return prev;
       const groups = prev.groups.map(g => {
         if (g.id === groupId) {
           return {
@@ -99,7 +121,7 @@ const App: React.FC = () => {
               id: Math.random().toString(36).substr(2, 9),
               content,
               attachment,
-              authorId: state.currentUser!.id,
+              authorId: prev.currentUser!.id,
               timestamp: new Date().toISOString()
             }]
           };
@@ -108,30 +130,44 @@ const App: React.FC = () => {
       });
       return { ...prev, groups };
     });
-  }, [state.currentUser]);
+  }, []);
 
   const handleUpdateGroupMembers = useCallback((groupId: string, memberIds: string[]) => {
-    setState(prev => ({
+    setState(prev => prev ? ({
       ...prev,
       groups: prev.groups.map(g => g.id === groupId ? { ...g, memberIds } : g)
-    }));
+    }) : null);
   }, []);
 
   const handleUploadStatus = useCallback((content?: string, attachment?: Attachment) => {
-    if (!state.currentUser) return;
-    const newStatus: StatusUpdate = {
-      id: Math.random().toString(36).substr(2, 9),
-      userId: state.currentUser.id,
-      userName: state.currentUser.name,
-      content,
-      attachment,
-      timestamp: new Date().toISOString()
-    };
-    setState(prev => ({
-      ...prev,
-      statuses: [...prev.statuses, newStatus]
-    }));
-  }, [state.currentUser]);
+    setState(prev => {
+      if (!prev || !prev.currentUser) return prev;
+      const newStatus: StatusUpdate = {
+        id: Math.random().toString(36).substr(2, 9),
+        userId: prev.currentUser.id,
+        userName: prev.currentUser.name,
+        content,
+        attachment,
+        timestamp: new Date().toISOString()
+      };
+      return {
+        ...prev,
+        statuses: [...prev.statuses, newStatus]
+      };
+    });
+  }, []);
+
+  if (isSyncing || !state) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6 text-center">
+        <div className="w-20 h-20 bg-indigo-600 rounded-[2rem] flex items-center justify-center text-white text-3xl animate-bounce shadow-2xl shadow-indigo-200 mb-8">
+          <i className="fas fa-sync-alt animate-spin"></i>
+        </div>
+        <h2 className="text-2xl font-black text-slate-800">B-Progress</h2>
+        <p className="text-sm text-slate-400 mt-2 uppercase tracking-widest font-bold">Synchronizing Global Learning Data...</p>
+      </div>
+    );
+  }
 
   if (!state.currentUser) {
     return <AuthScreen users={state.users} onLogin={handleLogin} onSignup={handleSignup} />;
