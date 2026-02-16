@@ -1,6 +1,6 @@
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { AppState } from '../types';
+import { AppState, Role } from '../types';
 import { STORAGE_KEY, INITIAL_USERS, INITIAL_TASKS } from '../constants';
 
 const supabaseUrl = process.env.SUPABASE_URL || '';
@@ -20,7 +20,13 @@ export const DataService = {
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: { data: metadata }
+      options: { 
+        data: {
+          ...metadata,
+          // Explicitly ensure the role is saved in user_metadata
+          role: metadata.role || Role.FRIEND 
+        } 
+      }
     });
     if (error) throw error;
     return data.user;
@@ -51,7 +57,7 @@ export const DataService = {
           .eq('id', userId)
           .single();
 
-        if (data) return data.state_json;
+        if (data && data.state_json) return data.state_json;
       } catch (e) {
         console.error("Cloud fetch failed for user:", userId, e);
       }
@@ -97,14 +103,49 @@ export const DataService = {
     }
   },
 
-  // Helper to get ALL states (Admin only)
-  async loadAllStates(): Promise<AppState[]> {
-    if (!this.isCloudEnabled()) return [];
-    const { data, error } = await supabase!
-      .from('app_state')
-      .select('state_json');
-    
-    if (error) return [];
-    return data.map(row => row.state_json);
+  // Helper to aggregate ALL data for the Supporter (Admin)
+  async loadMasterState(): Promise<AppState> {
+    const defaultState: AppState = {
+      users: INITIAL_USERS,
+      tasks: INITIAL_TASKS,
+      records: [],
+      messages: [],
+      groups: [],
+      statuses: [],
+      currentUser: null,
+    };
+
+    if (!this.isCloudEnabled()) return defaultState;
+
+    try {
+      const { data, error } = await supabase!
+        .from('app_state')
+        .select('state_json');
+
+      if (error || !data) return defaultState;
+
+      // Merge all user states into one for the Admin view
+      return data.reduce((acc, row) => {
+        const userState: AppState = row.state_json;
+        if (!userState) return acc;
+
+        return {
+          ...acc,
+          // Collect all users across all rows
+          users: [...acc.users, ...(userState.currentUser ? [userState.currentUser] : [])],
+          // Collect all records
+          records: [...acc.records, ...(userState.records || [])],
+          // Collect all messages
+          messages: [...acc.messages, ...(userState.messages || [])],
+          // Collect all statuses
+          statuses: [...acc.statuses, ...(userState.statuses || [])],
+          // Deduplicate groups by ID
+          groups: Array.from(new Map([...acc.groups, ...(userState.groups || [])].map(g => [g.id, g])).values()),
+        };
+      }, defaultState);
+    } catch (e) {
+      console.error("Master load failed", e);
+      return defaultState;
+    }
   }
 };
